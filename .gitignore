@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.pyc
+
+# Experiment outputs
+venv/
+.vscode/
+
+# Large model files
+*.pth
+*.ckpt
+*.bin
+*.pt
+*.safetensors
