@@ -111,6 +111,11 @@ class TrainingArguments(transformers.TrainingArguments):
     mm_projector_lr: Optional[float] = None
     group_by_modality_length: bool = field(default=False)
 
+    # 新增cl-moe参数
+    task_id: int = field(default=0, metadata={"help": "Current continual learning task ID (0 for the first task)."})
+    router_temperature: float = field(default=1.0, metadata={"help": "Temperature for MoE routing Gumbel-Softmax."})
+    router_loss_alpha: float = field(default=1.0, metadata={"help": "Weight of the routing loss."})
+    pretrained_moe_lora_path: Optional[str] = field(default=None, metadata={"help": "Path to previous task's MoE LoRA weights."})
 
 def maybe_zero_3(param, ignore_status=False, name=None):
     from deepspeed import zero
@@ -857,23 +862,84 @@ def train(attn_implementation=None):
                 output.requires_grad_(True)
             model.get_input_embeddings().register_forward_hook(make_inputs_require_grad)
 
+    # if training_args.lora_enable:
+    #     from peft import LoraConfig, get_peft_model
+    #     lora_config = LoraConfig(
+    #         r=training_args.lora_r,
+    #         lora_alpha=training_args.lora_alpha,
+    #         target_modules=find_all_linear_names(model),
+    #         lora_dropout=training_args.lora_dropout,
+    #         bias=training_args.lora_bias,
+    #         task_type="CAUSAL_LM",
+    #     )
+    #     if training_args.bits == 16:
+    #         if training_args.bf16:
+    #             model.to(torch.bfloat16)
+    #         if training_args.fp16:
+    #             model.to(torch.float16)
+    #     rank0_print("Adding LoRA adapters...")
+    #     model = get_peft_model(model, lora_config)
+
     if training_args.lora_enable:
-        from peft import LoraConfig, get_peft_model
-        lora_config = LoraConfig(
+        from llava.cl.moe_lora import MOELoraConfig, MOELoraModel 
+        lora_config = MOELoraConfig(
             r=training_args.lora_r,
             lora_alpha=training_args.lora_alpha,
             target_modules=find_all_linear_names(model),
             lora_dropout=training_args.lora_dropout,
             bias=training_args.lora_bias,
             task_type="CAUSAL_LM",
+            expert_num=getattr(training_args, 'expert_num', 1), 
+            router_temperature=getattr(training_args, 'router_temperature', 1.0)
         )
         if training_args.bits == 16:
             if training_args.bf16:
                 model.to(torch.bfloat16)
             if training_args.fp16:
                 model.to(torch.float16)
-        rank0_print("Adding LoRA adapters...")
-        model = get_peft_model(model, lora_config)
+        rank0_print("Adding MoE LoRA adapters...")
+        model = MOELoraModel(model, lora_config, "default")
+        # 【核心新增：在扩增专家前，将上一轮任务的知识灌入模型】
+        if getattr(training_args, 'pretrained_moe_lora_path', None) is not None:
+            # 兼容 HuggingFace 的标准命名和 PEFT 的特殊命名
+            possible_files = [
+                "model.safetensors", 
+                "adapter_model.safetensors",
+                "pytorch_model.bin",
+                "adapter_model.bin"
+            ]
+            
+            old_state_dict = None
+            rank0_print(f"Continual Learning: Loading previous experts from {training_args.pretrained_moe_lora_path}")
+            
+            for file_name in possible_files:
+                file_path = os.path.join(training_args.pretrained_moe_lora_path, file_name)
+                if os.path.exists(file_path):
+                    rank0_print(f"Found weight file: {file_name}")
+                    if file_name.endswith(".safetensors"):
+                        from safetensors.torch import load_file
+                        old_state_dict = load_file(file_path)
+                    else:
+                        old_state_dict = torch.load(file_path, map_location="cpu")
+                    break # 找到一个就跳出循环
+            
+            if old_state_dict is not None:
+                # strict=False 允许只加载我们自定义的 lora 权重字典，忽略非相关的键
+                missing_keys, unexpected_keys = model.load_state_dict(old_state_dict, strict=False)
+                rank0_print(f"Loaded previous MoE LoRA weights. (Unexpected keys count: {len(unexpected_keys)})")
+            else:
+                rank0_print("WARNING: Could not find any valid weight file in pretrained_moe_lora_path!")
+
+        # 假设你在 TrainingArguments 中传入了当前的 task_id (0表示第一个任务，1表示第二个...)
+        current_task_id = getattr(training_args, 'task_id', 0)
+        if current_task_id > 0:
+            rank0_print(f"Continual Learning: Preparing experts for Task {current_task_id}")
+            from llava.cl.moe_lora import MOELoraLinear
+            for name, module in model.named_modules(): # 遍历模型，为每个 MOELoraLinear 新增专家并冻结旧参数
+                if isinstance(module, MOELoraLinear):
+                    # 如果你的旧模型是通过 load_pretrained 加载的，它当前可能只有 N 个专家
+                    # 这里我们要追加到 N+1 个
+                    module.add_new_task_expert()
 
     if 'mpt' in model_args.model_name_or_path:
         tokenizer = transformers.AutoTokenizer.from_pretrained(
@@ -966,6 +1032,33 @@ def train(attn_implementation=None):
     if list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")):
         trainer.train(resume_from_checkpoint=True)
     else:
+        # ============== 新增：打印模型参数状态的检查代码 ==============
+        def print_trainable_parameters(model):
+            trainable_param_names = []
+            trainable_params = 0
+            all_param = 0
+            for name, param in model.named_parameters():
+                all_param += param.numel()
+                if param.requires_grad:
+                    trainable_params += param.numel()
+                    trainable_param_names.append(name)
+            
+            rank0_print("\n" + "="*50)
+            rank0_print(f"Total params: {all_param:,d}")
+            rank0_print(f"Trainable params: {trainable_params:,d}")
+            rank0_print(f"Trainable %: {100 * trainable_params / all_param:.4f}%")
+            rank0_print("="*50)
+            rank0_print("Trainable Layers (Top 50 displayed):")
+            # 打印前50个可训练的层，防止日志太长
+            for name in trainable_param_names[:50]:
+                rank0_print(f"  -> {name}")
+            if len(trainable_param_names) > 50:
+                rank0_print(f"  ... and {len(trainable_param_names) - 50} more trainable layers.")
+            rank0_print("="*50 + "\n")
+
+        print_trainable_parameters(model)
+        # ==============================================================
+
         trainer.train()
     trainer.save_state()
 

@@ -22,6 +22,10 @@ import torch
 from llava.model import *
 from llava.constants import DEFAULT_IMAGE_PATCH_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
 
+import json
+import os
+from llava.cl.moe_lora import MOELoraConfig, MOELoraModel, MOELoraLinear
+
 
 def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, load_4bit=False, device_map="auto", device="cuda", use_flash_attn=False, **kwargs):
     kwargs = {"device_map": device_map, **kwargs}
@@ -78,12 +82,81 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
                 non_lora_trainables = {(k[6:] if k.startswith('model.') else k): v for k, v in non_lora_trainables.items()}
             model.load_state_dict(non_lora_trainables, strict=False)
 
-            from peft import PeftModel
-            print('Loading LoRA weights...')
-            model = PeftModel.from_pretrained(model, model_path)
-            print('Merging LoRA weights...')
-            model = model.merge_and_unload()
-            print('Model is loaded...')
+            # from peft import PeftModel
+            # print('Loading LoRA weights...')
+            # model = PeftModel.from_pretrained(model, model_path)
+            # print('Merging LoRA weights...')
+            # model = model.merge_and_unload()
+            # print('Model is loaded...')
+
+            # LLaVA-CL-MOE 自定义加载逻辑
+            
+            print('Wrapping base model with MOELoraModel...')
+            # 加载 config
+            config_path = os.path.join(model_path, 'adapter_config.json')
+            if os.path.exists(config_path):
+                with open(config_path, 'r') as f:
+                    lora_cfg_dict = json.load(f)
+                # 过滤掉无法识别的 PEFT 保留键
+                lora_cfg_dict.pop("peft_type", None)
+                lora_cfg_dict.pop("auto_mapping", None)
+                lora_config = MOELoraConfig(**lora_cfg_dict)
+            else:
+                lora_config = MOELoraConfig(r=128, lora_alpha=256, target_modules=["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "down_proj", "up_proj"])
+            
+            # 使用我们的 Wrapper 接管基座模型
+            model = MOELoraModel(model, lora_config, "default")
+            
+            # 读取权重 (精准识别 model.safetensors)
+            print('Loading LLaVA-CL-MOE weights...')
+            weight_path = os.path.join(model_path, 'model.safetensors')
+            if not os.path.exists(weight_path):
+                weight_path = os.path.join(model_path, 'pytorch_model.bin')
+                
+            if weight_path.endswith('.safetensors'):
+                from safetensors.torch import load_file
+                state_dict = load_file(weight_path)
+            else:
+                state_dict = torch.load(weight_path, map_location='cpu')
+                
+            # 探测当前 checkpoint 包含几个专家 (计算最大索引)
+            max_expert_idx = 0
+            for k in state_dict.keys():
+                if 'lora_A_experts' in k:
+                    parts = k.split('.')
+                    for i, p in enumerate(parts):
+                        if p == 'lora_A_experts':
+                            idx = int(parts[i+1])
+                            if idx > max_expert_idx:
+                                max_expert_idx = idx
+            
+            # 根据索引扩增专家节点，使得模型计算图与要加载的权重尺寸完美对应
+            print(f"Detected {max_expert_idx + 1} experts in checkpoint. Expanding model experts...")
+            for _ in range(max_expert_idx):
+                for name, module in model.named_modules():
+                    if isinstance(module, MOELoraLinear):
+                        module.add_new_task_expert()
+                        
+            # 将探测好的权重严格加载进去
+            missing, unexpected = model.load_state_dict(state_dict, strict=False)
+            print(f"MoE weights loaded. Unexpected keys: {len(unexpected)}")
+            
+            # ================== 【新增：动态对齐设备与精度】 ==================
+            # 遍历模型，把新初始化的 CPU 专家搬到基座模型所在的 GPU，并对齐 fp16 精度
+            for name, module in model.named_modules():
+                if isinstance(module, MOELoraLinear):
+                    # 获取当前基座层所在的设备 (cuda:0) 和 精度 (float16/bfloat16)
+                    target_device = module.base_layer.weight.device
+                    target_dtype = module.base_layer.weight.dtype
+                    
+                    # 将自定义的 ModuleList 统统搬过去
+                    module.lora_A_experts.to(device=target_device, dtype=target_dtype)
+                    module.lora_B_experts.to(device=target_device, dtype=target_dtype)
+                    module.lora_routers.to(device=target_device, dtype=target_dtype)
+            # ==================================================================
+            
+            print('Model is loaded... (Skipped merge_and_unload for dynamic MoE)')
+
         elif model_base is not None:
             # this may be mm projector only
             print('Loading LLaVA from base model...')
