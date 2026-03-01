@@ -79,8 +79,8 @@ if __name__ == "__main__":
     # args = parser.parse_args()
 
     # 建议使用绝对路径，避免找不到文件
-    PRED_FILE = "/media/AI4MED1/hanjiacheng/LLaVA-CL-MOE/output/2-IS-EV17/3.1/IL-EV17.jsonl"
-    GT_FILE = "/media/AI4MED1/hanjiacheng/Surgical-VQACL-Data/IL-EV17/instrument_location_ev17_test.json"
+    PRED_FILE = "/media/AI4MED1/hanjiacheng/LLaVA-CL-MOE/output/2-IS-EV17/3.1/IS-EV17.jsonl"
+    GT_FILE = "/media/AI4MED1/hanjiacheng/Surgical-VQACL-Data/IS-EV17/instrument_state_ev17_test.json"
     
     if os.path.exists(PRED_FILE) and os.path.exists(GT_FILE):
         score = calculate_word_recall(PRED_FILE, GT_FILE)

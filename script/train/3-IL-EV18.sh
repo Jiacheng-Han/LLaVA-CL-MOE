@@ -2,21 +2,24 @@
 
 cd /media/AI4MED1/hanjiacheng/LLaVA-CL-MOE
 
-# 【恢复】：必须使用原始的基座模型来加载结构和 Tokenizer
+# 1. 基座模型保持不变
 MODEL_PATH="/media/AI4MED1/hanjiacheng/LLaVA-CL-MOE/models/llava-med-v1.5-mistral-7b"
 
-# 【新增】：专门指向上一任务 LoRA 权重的路径
-PRETRAIN_MOE_LORA_PATH="/media/AI4MED1/hanjiacheng/LLaVA-CL-MOE/checkpoints/1-IL-EV17/llava-med-v1.5-moe-lora-2.28"
+# 2. 【核心修改】：指向上一个任务（任务二 IS-EV17）训好的 checkpoint 路径
+PRETRAIN_MOE_LORA_PATH="/media/AI4MED1/hanjiacheng/LLaVA-CL-MOE/checkpoints/2-IS-EV17/llava-med-v1.5-moe-lora-3.1"
 
-DATA_PATH="/media/AI4MED1/hanjiacheng/Surgical-VQACL-Data/IS-EV17/instrument_state_ev17_train.json"
-IMAGE_FOLDER="/media/AI4MED1/hanjiacheng/data/EndoVis-17-VQLA/left_frames"
+# 3. 任务三的数据和图片路径 (IL-EV18)
+DATA_PATH="/media/AI4MED1/hanjiacheng/Surgical-VQACL-Data/IL-EV18/instrument_location_ev18_train.json"
+IMAGE_FOLDER="/media/AI4MED1/hanjiacheng/data/EndoVis-18-VQLA"
 VISION_TOWER_PATH="/media/AI4MED1/hanjiacheng/LLaVA-CL-MOE/models/clip-vit-large-patch14-336"
+
+# 通用视觉映射MLP层（继续冻结使用）
 PRETRAIN_PROJECTOR_PATH="/media/AI4MED1/hanjiacheng/LLaVA/checkpoints/upper-bound/5data/llava-med-v1.5-lora-1.29/non_lora_trainables.bin"
 
-OUTPUT_DIR="/media/AI4MED1/hanjiacheng/LLaVA-CL-MOE/checkpoints/2-IS-EV17/llava-med-v1.5-moe-lora-3.1"
+# 4. 任务三的输出路径
+OUTPUT_DIR="/media/AI4MED1/hanjiacheng/LLaVA-CL-MOE/checkpoints/3-IL-EV18/llava-med-v1.5-moe-lora-3.1"
 
-deepspeed --include localhost:2,3 \
-    llava/train/train_mem.py \
+deepspeed --include localhost:2,3 llava/train/train_mem.py \
     --deepspeed /media/AI4MED1/hanjiacheng/LLaVA-CL-MOE/script/zero2.json \
     --model_name_or_path $MODEL_PATH \
     --pretrained_moe_lora_path $PRETRAIN_MOE_LORA_PATH \
@@ -58,6 +61,6 @@ deepspeed --include localhost:2,3 \
     --lora_alpha 256 \
     --freeze_mm_mlp_adapter True \
     --tune_mm_mlp_adapter False \
-    --task_id 1 \
+    --task_id 2 \
     --router_temperature 1.0 \
     --router_loss_alpha 1.0

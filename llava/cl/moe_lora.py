@@ -203,12 +203,12 @@ class MOELoraLinear(nn.Module, MOELoraLayer):
             # 【推理阶段】：多专家组合 或 上帝视角Hack
 
             # -------------------------------------------------------------
-            # 正常路由代码（目前注销）：
-            # router_weights = F.softmax(router_logits / self.router_temperature, dim=-1)
+            # 正常路由代码：
+            router_weights = F.softmax(router_logits / self.router_temperature, dim=-1)
             
             # 【上帝视角测试 Hack】：强行指定使用第 0 组专家 (测任务一必备！)
-            router_weights = torch.zeros_like(router_logits)
-            router_weights[..., 0] = 1.0
+            # router_weights = torch.zeros_like(router_logits)
+            # router_weights[..., 0] = 1.0
             # -------------------------------------------------------------
 
             for i in range(self.current_expert_num):

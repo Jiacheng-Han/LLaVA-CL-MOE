@@ -12,16 +12,16 @@ cd /media/AI4MED1/hanjiacheng/LLaVA-CL-MOE
 MODEL_BASE="/media/AI4MED1/hanjiacheng/LLaVA-CL-MOE/models/llava-med-v1.5-mistral-7b"
 
 # 指向刚训练好的路径
-MODEL_PATH="/media/AI4MED1/hanjiacheng/LLaVA-CL-MOE/checkpoints/2-IS-EV17/llava-med-v1.5-moe-lora-epoch50"
+MODEL_PATH="/media/AI4MED1/hanjiacheng/LLaVA-CL-MOE/checkpoints/2-IS-EV17/llava-med-v1.5-moe-lora-3.1"
 
 # question 文件 
-QUESTION_FILE="/media/AI4MED1/hanjiacheng/Surgical-VQACL-Data/IL-EV17/instrument_location_ev17_test.jsonl"
+QUESTION_FILE="/media/AI4MED1/hanjiacheng/Surgical-VQACL-Data/IS-EV17/instrument_state_ev17_test.jsonl"
 
 # 图片文件夹 
 IMAGE_FOLDER="/media/AI4MED1/hanjiacheng/data/EndoVis-17-VQLA/left_frames"
 
 # 结果保存文件 (修改为当前工程的 output)
-ANSWERS_FILE="/media/AI4MED1/hanjiacheng/LLaVA-CL-MOE/output/2-IS-EV17/3.1-epoch50/IL-EV17.jsonl"
+ANSWERS_FILE="/media/AI4MED1/hanjiacheng/LLaVA-CL-MOE/output/2-IS-EV17/3.1/IS-EV17.jsonl"
 
 # --- 3. 运行推理 ---  
 python -m llava.eval.model_vqa \
