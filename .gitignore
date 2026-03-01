@@ -5,6 +5,8 @@ __pycache__/
 # Experiment outputs
 venv/
 .vscode/
+models/
+checkpoints/
 
 # Large model files
 *.pth

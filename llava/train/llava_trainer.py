@@ -253,3 +253,40 @@ class LLaVATrainer(Trainer):
             pass
         else:
             super(LLaVATrainer, self)._save(output_dir, state_dict)
+    
+    # 重写（Override） compute_loss 方法
+    def compute_loss(self, model, inputs, return_outputs=False):
+        # 1. 正常的前向传播计算语言模型 Loss (CrossEntropy for text generation)
+        outputs = model(**inputs)
+        # HF 原生的 CausalLM output_loss 
+        loss = outputs.loss if isinstance(outputs, dict) else outputs[0]
+
+        # 2. 计算持续学习的 Routing Loss
+        current_task_id = getattr(self.args, 'task_id', 0)
+        routing_loss = 0.0
+        router_count = 0
+        
+        for name, module in model.named_modules():
+            # 找到我们保存了 logits 的 MOE 模块
+            if hasattr(module, 'saved_router_logits') and module.saved_router_logits is not None:
+                logits = module.saved_router_logits # 形状: [batch, seq_len, expert_num]
+                
+                # 目标：强制路由到当前的 current_task_id
+                target = torch.full(logits.shape[:-1], current_task_id, dtype=torch.long, device=logits.device)
+                
+                # 计算交叉熵
+                routing_loss += torch.nn.functional.cross_entropy(
+                    logits.view(-1, logits.size(-1)), 
+                    target.view(-1)
+                )
+                router_count += 1
+                
+                # 用完后清空，防止显存泄漏
+                module.saved_router_logits = None 
+
+        if router_count > 0:
+            # 你可以在 args 里加一个 router_loss_alpha 控制权重，比如 0.1 或 1.0
+            alpha = getattr(self.args, "router_loss_alpha", 1.0) 
+            loss += alpha * (routing_loss / router_count)
+
+        return (loss, outputs) if return_outputs else loss
