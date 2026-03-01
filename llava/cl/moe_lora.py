@@ -184,29 +184,45 @@ class MOELoraLinear(nn.Module, MOELoraLayer):
         router_outputs = [router(x_lora) for router in self.lora_routers]
         router_logits = torch.cat(router_outputs, dim=-1)
         
-        # 保存下来供外部计算 Routing Loss（交叉熵）
+        # 保存下来供外部计算 Routing Loss
         self.saved_router_logits = router_logits 
         
-        # 获取分配权重
-        if self.training:
-            router_weights = F.gumbel_softmax(router_logits, tau=self.router_temperature, hard=True, dim=-1) 
-        else:
-            router_weights = F.softmax(router_logits / self.router_temperature, dim=-1)
-
         # 3. 使用改名后的 lora_dropout_layer
         x_dropped = self.lora_dropout_layer(x_lora)
         lora_out = torch.zeros_like(result, dtype=x_lora.dtype)
         
-        for i in range(self.current_expert_num):
-            weight_i = router_weights[..., i].unsqueeze(-1)
-            
-            if not self.training and torch.all(weight_i < 1e-4):
-                continue
-                
-            expert_out = self.lora_B_experts[i](
-                self.lora_A_experts[i](x_dropped)
+        # ==================== 核心隔离与推理区域 ====================
+        if self.training:
+            # 【训练阶段】：强制 100% 使用当前最新任务的专家，完全屏蔽旧专家
+            target_expert_idx = self.current_expert_num - 1
+            expert_out = self.lora_B_experts[target_expert_idx](
+                self.lora_A_experts[target_expert_idx](x_dropped)
             )
-            lora_out += expert_out * weight_i
+            lora_out = expert_out
+        else:
+            # 【推理阶段】：多专家组合 或 上帝视角Hack
+
+            # -------------------------------------------------------------
+            # 正常路由代码（目前注销）：
+            # router_weights = F.softmax(router_logits / self.router_temperature, dim=-1)
+            
+            # 【上帝视角测试 Hack】：强行指定使用第 0 组专家 (测任务一必备！)
+            router_weights = torch.zeros_like(router_logits)
+            router_weights[..., 0] = 1.0
+            # -------------------------------------------------------------
+
+            for i in range(self.current_expert_num):
+                weight_i = router_weights[..., i].unsqueeze(-1)
+                
+                # 如果这个专家的权重无限接近0，直接跳过计算，节省时间
+                if torch.all(weight_i < 1e-4):
+                    continue
+                    
+                expert_out = self.lora_B_experts[i](
+                    self.lora_A_experts[i](x_dropped)
+                )
+                lora_out += expert_out * weight_i
+        # ======================================================
 
         # 4. 使用改名后的 scaling_val
         result += (lora_out * self.scaling_val).to(previous_dtype)

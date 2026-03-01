@@ -881,7 +881,7 @@ def train(attn_implementation=None):
     #     model = get_peft_model(model, lora_config)
 
     if training_args.lora_enable:
-        from llava.cl.moe_lora import MOELoraConfig, MOELoraModel 
+        from llava.cl.moe_lora import MOELoraConfig, MOELoraModel, MOELoraLinear
         lora_config = MOELoraConfig(
             r=training_args.lora_r,
             lora_alpha=training_args.lora_alpha,
@@ -930,15 +930,24 @@ def train(attn_implementation=None):
             else:
                 rank0_print("WARNING: Could not find any valid weight file in pretrained_moe_lora_path!")
 
-        # 假设你在 TrainingArguments 中传入了当前的 task_id (0表示第一个任务，1表示第二个...)
+        # 传入了当前的 task_id (0表示第一个任务，1表示第二个...)
         current_task_id = getattr(training_args, 'task_id', 0)
-        if current_task_id > 0:
-            rank0_print(f"Continual Learning: Preparing experts for Task {current_task_id}")
-            from llava.cl.moe_lora import MOELoraLinear
-            for name, module in model.named_modules(): # 遍历模型，为每个 MOELoraLinear 新增专家并冻结旧参数
+
+        # 1. 【新增】先扩容补齐旧任务的 Expert 坑位，确保能够承接旧权重
+        # 注意：初始化自带1个，所以再补加 current_task_id - 1 个
+        for _ in range(current_task_id - 1):
+            for name, module in model.named_modules():
                 if isinstance(module, MOELoraLinear):
-                    # 如果你的旧模型是通过 load_pretrained 加载的，它当前可能只有 N 个专家
-                    # 这里我们要追加到 N+1 个
+                    module.add_new_task_expert()
+
+        # 2. 【原代码】加载上一轮的权重 (此时 strict=False 不会再误删旧专家)
+        if getattr(training_args, 'pretrained_moe_lora_path', None) is not None:
+            missing_keys, unexpected_keys = model.load_state_dict(old_state_dict, strict=False)
+
+        # 3. 【修改位置】最后再为【本次即将训练的新任务】单独建一个新 Expert
+        if current_task_id > 0:
+            for name, module in model.named_modules():
+                if isinstance(module, MOELoraLinear):
                     module.add_new_task_expert()
 
     if 'mpt' in model_args.model_name_or_path:
