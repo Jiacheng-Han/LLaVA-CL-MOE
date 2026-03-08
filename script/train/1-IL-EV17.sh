@@ -9,7 +9,7 @@ VISION_TOWER_PATH="/media/AI4MED1/hanjiacheng/LLaVA-CL-MOE/models/clip-vit-large
 # 通用视觉映射MLP层
 PRETRAIN_PROJECTOR_PATH="/media/AI4MED1/hanjiacheng/LLaVA/checkpoints/upper-bound/5data/llava-med-v1.5-lora-1.29/non_lora_trainables.bin"
 
-OUTPUT_DIR="/media/AI4MED1/hanjiacheng/LLaVA-CL-MOE/checkpoints/1-IL-EV17/llava-med-v1.5-moe-lora-3.8-2"
+OUTPUT_DIR="/media/AI4MED1/hanjiacheng/LLaVA-CL-MOE/checkpoints/1-IL-EV17/llava-med-v1.5-moe-lora-3.8"
 
 deepspeed --include localhost:0,1 \
     --master_port=29401 \
@@ -56,4 +56,4 @@ deepspeed --include localhost:0,1 \
     --tune_mm_mlp_adapter False \
     --task_id 0 \
     --router_temperature 1.0 \
-    --router_loss_alpha 1.0
+    --router_loss_alpha 0.0

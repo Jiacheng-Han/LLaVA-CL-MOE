@@ -2,7 +2,7 @@
 
 # --- 1. 显卡设置 ---
 # 指定使用哪张卡运行推理
-export CUDA_VISIBLE_DEVICES=3
+export CUDA_VISIBLE_DEVICES=1
 
 # --- 2. 路径配置 ---
 # 切换到你修改后的工程根目录
@@ -22,7 +22,7 @@ QUESTION_FILE="/media/AI4MED1/hanjiacheng/Surgical-VQACL-Data/IS-EV17/instrument
 IMAGE_FOLDER="/media/AI4MED1/hanjiacheng/data/EndoVis-17-VQLA/left_frames"
 
 # 结果保存文件 (修改为当前工程的 output)
-ANSWERS_FILE="/media/AI4MED1/hanjiacheng/LLaVA-CL-MOE/output/2-IS-EV17/3.8/IS-EV17.jsonl"
+ANSWERS_FILE="/media/AI4MED1/hanjiacheng/LLaVA-CL-MOE/output/2-IS-EV17/3.8/IS-EV17-top1.jsonl"
 
 # --- 3. 运行推理 ---  
 python -m llava.eval.model_vqa \

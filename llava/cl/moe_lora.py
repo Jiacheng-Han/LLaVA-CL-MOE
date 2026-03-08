@@ -42,7 +42,7 @@ class MOELoraModel(LoraModel):
         super().__init__(model, config, adapter_name)
 
     def _create_new_module(self, lora_config, adapter_name, target, **kwargs):
-        if isinstance(target, nn.Linear): # 针对每个线性层进行处理替换
+        if isinstance(target, nn.Linear):  # 针对每个线性层进行处理替换
             return MOELoraLinear(
                 base_layer=target,
                 adapter_name=adapter_name,
@@ -152,6 +152,7 @@ def normalize_moe_lora_state_dict(
         "legacy_router_groups_converted": converted_groups,
     }
 
+
 class MOELoraLayer(LoraLayer):
     """
     Core data structure for experts + matrix router.
@@ -199,7 +200,6 @@ class MOELoraLayer(LoraLayer):
         """
         Backward-compatible alias for old external calls (e.g., builder device cast).
         """
-
         return self.lora_router
 
     def _remove_router_hooks(self):
@@ -336,19 +336,57 @@ class MOELoraLinear(nn.Module, MOELoraLayer):
         x_lora = x.to(self.lora_A_experts[0].weight.dtype)
         x_dropped = self.lora_dropout_layer(x_lora)
 
-        # Router: logits in [..., K], weights in probability simplex after softmax.
-        router_logits = self.lora_router(x_lora) # [batch_size, K]
+        # Router: use sample-level routing by pooling token states first.
+        # [B, T, D] -> [B, D], then obtain one shared expert mixture per sample.
+        if x_lora.dim() == 3:
+            router_input = x_lora.mean(dim=1)
+        else:
+            router_input = x_lora
+
+        router_logits = self.lora_router(router_input)  # [B, K] or [*, K]
         self.saved_router_logits = router_logits
         router_weights = F.softmax(router_logits / self.router_temperature, dim=-1)
 
-        # Experts: stack as [..., K, out_features], then weighted sum over K.
+        # force_expert = 1 # 强制使用指定个专家（仅用于测试）
+        # if not self.training:
+        #     if 0 <= force_expert < self.current_expert_num:
+        #         forced = torch.zeros_like(router_weights)
+        #         forced[..., force_expert] = 1.0
+        #         router_weights = forced
+
+        # 选择top-1专家
+        if not self.training:
+            # top-1 expert selection at inference
+            top1_idx = router_weights.argmax(dim=-1)   # [B] or [...]
+            one_hot = torch.zeros_like(router_weights)
+            one_hot.scatter_(-1, top1_idx.unsqueeze(-1), 1.0)
+            router_weights = one_hot
+
+        # 查看权重
+        # if not self.training:
+        #     if not hasattr(self, "router_stat"):
+        #         self.router_stat = torch.zeros(router_weights.shape[-1], device=router_weights.device)
+        #         self.router_count = 0
+
+        #     self.router_stat += router_weights.mean(dim=0).detach()
+        #     self.router_count += 1
+
+        # Experts: compute token-level expert outputs, but mix them with sample-level weights.
         expert_outs = []
         for i in range(self.current_expert_num):
-            expert_out = self.lora_B_experts[i](self.lora_A_experts[i](x_dropped)) # 对每个专家做线性变换
-            expert_outs.append(expert_out) 
+            expert_out = self.lora_B_experts[i](self.lora_A_experts[i](x_dropped))
+            expert_outs.append(expert_out)
 
         expert_outs = torch.stack(expert_outs, dim=-2)
-        lora_out = (expert_outs * router_weights.unsqueeze(-1)).sum(dim=-2) # stack后对K个专家按router权重加权求和
+        if expert_outs.dim() == 4:
+            # [B, T, K, O] * [B, 1, K, 1]
+            router_weights = router_weights.unsqueeze(1)
+        lora_out = (expert_outs * router_weights.unsqueeze(-1)).sum(dim=-2)
 
         result = result + (lora_out * self.scaling_val).to(previous_dtype)
+
+        # if not self.training and self.router_count % 50 == 0: # 每50个batch打印一次平均权重
+        #     avg = (self.router_stat / self.router_count).detach().cpu()
+        #     print(f"[Router Debug] avg weights: {avg}")
+
         return result

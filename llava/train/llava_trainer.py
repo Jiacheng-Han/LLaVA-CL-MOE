@@ -1,6 +1,5 @@
 import os
 import torch
-import torch.nn as nn
 
 from torch.utils.data import Sampler
 
@@ -21,7 +20,7 @@ def maybe_zero_3(param, ignore_status=False, name=None):
     if hasattr(param, "ds_id"):
         if param.ds_status == ZeroParamStatus.NOT_AVAILABLE:
             if not ignore_status:
-                print(name, 'no ignore status')
+                print(name, "no ignore status")
         with zero.GatheredParameters([param]):
             param = param.data.detach().cpu().clone()
     else:
@@ -31,13 +30,13 @@ def maybe_zero_3(param, ignore_status=False, name=None):
 
 def get_mm_adapter_state_maybe_zero_3(named_params, keys_to_match):
     to_return = {k: t for k, t in named_params if any(key_match in k for key_match in keys_to_match)}
-    to_return = {k: maybe_zero_3(v, ignore_status=True, name=k).cpu() for k, v in to_return.items()}
+    to_return = {k: maybe_zero_3(v, ignore_status=True, name=k) for k, v in to_return.items()}
     return to_return
 
 
 def split_to_even_chunks(indices, lengths, num_chunks):
     """
-    Split a list of indices into `chunks` chunks of roughly equal lengths.
+    Split a list of indices into `num_chunks` chunks of roughly equal lengths.
     """
 
     if len(indices) % num_chunks != 0:
@@ -57,20 +56,30 @@ def split_to_even_chunks(indices, lengths, num_chunks):
     return chunks
 
 
+def get_length_grouped_indices(lengths, batch_size, world_size, generator=None, merge=True):
+    indices = torch.randperm(len(lengths), generator=generator)
+    megabatch_size = world_size * batch_size
+    megabatches = [indices[i: i + megabatch_size].tolist() for i in range(0, len(lengths), megabatch_size)]
+    megabatches = [sorted(megabatch, key=lambda i: lengths[i], reverse=True) for megabatch in megabatches]
+    megabatches = [split_to_even_chunks(megabatch, lengths, world_size) for megabatch in megabatches]
+
+    return [i for megabatch in megabatches for batch in megabatch for i in batch]
+
+
 def get_modality_length_grouped_indices(lengths, batch_size, world_size, generator=None):
-    # We need to use torch for the random part as a distributed sampler will set the random seed for torch.
     assert all(l != 0 for l in lengths), "Should not have zero length."
     if all(l > 0 for l in lengths) or all(l < 0 for l in lengths):
-        # all samples are in the same modality
         return get_length_grouped_indices(lengths, batch_size, world_size, generator=generator)
+
     mm_indices, mm_lengths = zip(*[(i, l) for i, l in enumerate(lengths) if l > 0])
     lang_indices, lang_lengths = zip(*[(i, -l) for i, l in enumerate(lengths) if l < 0])
 
     mm_shuffle = [mm_indices[i] for i in get_length_grouped_indices(mm_lengths, batch_size, world_size, generator=None)]
     lang_shuffle = [lang_indices[i] for i in get_length_grouped_indices(lang_lengths, batch_size, world_size, generator=None)]
+
     megabatch_size = world_size * batch_size
-    mm_megabatches = [mm_shuffle[i : i + megabatch_size] for i in range(0, len(mm_shuffle), megabatch_size)]
-    lang_megabatches = [lang_shuffle[i : i + megabatch_size] for i in range(0, len(lang_shuffle), megabatch_size)]
+    mm_megabatches = [mm_shuffle[i: i + megabatch_size] for i in range(0, len(mm_shuffle), megabatch_size)]
+    lang_megabatches = [lang_shuffle[i: i + megabatch_size] for i in range(0, len(lang_shuffle), megabatch_size)]
 
     last_mm = mm_megabatches[-1]
     last_lang = lang_megabatches[-1]
@@ -83,17 +92,6 @@ def get_modality_length_grouped_indices(lengths, batch_size, world_size, generat
         megabatches.append(sorted(additional_batch))
 
     return [i for megabatch in megabatches for i in megabatch]
-
-
-def get_length_grouped_indices(lengths, batch_size, world_size, generator=None, merge=True):
-    # We need to use torch for the random part as a distributed sampler will set the random seed for torch.
-    indices = torch.randperm(len(lengths), generator=generator)
-    megabatch_size = world_size * batch_size
-    megabatches = [indices[i : i + megabatch_size].tolist() for i in range(0, len(lengths), megabatch_size)]
-    megabatches = [sorted(megabatch, key=lambda i: lengths[i], reverse=True) for megabatch in megabatches]
-    megabatches = [split_to_even_chunks(megabatch, lengths, world_size) for megabatch in megabatches]
-
-    return [i for megabatch in megabatches for batch in megabatch for i in batch]
 
 
 class LengthGroupedSampler(Sampler):
@@ -124,9 +122,19 @@ class LengthGroupedSampler(Sampler):
 
     def __iter__(self):
         if self.group_by_modality:
-            indices = get_modality_length_grouped_indices(self.lengths, self.batch_size, self.world_size, generator=self.generator)
+            indices = get_modality_length_grouped_indices(
+                self.lengths,
+                self.batch_size,
+                self.world_size,
+                generator=self.generator,
+            )
         else:
-            indices = get_length_grouped_indices(self.lengths, self.batch_size, self.world_size, generator=self.generator)
+            indices = get_length_grouped_indices(
+                self.lengths,
+                self.batch_size,
+                self.world_size,
+                generator=self.generator,
+            )
         return iter(indices)
 
 
@@ -210,20 +218,27 @@ class LLaVATrainer(Trainer):
 
             optimizer_cls, optimizer_kwargs = Trainer.get_optimizer_cls_and_kwargs(self.args)
 
-            self.optimizer = optimizer_cls(optimizer_grouped_parameters, **optimizer_kwargs)
-            if optimizer_cls.__name__ == "Adam8bit":
-                import bitsandbytes
+            sharded_ddp_option = getattr(self, "sharded_ddp", None)
+            if str(sharded_ddp_option).lower() == "simple":
+                self.optimizer = optimizer_cls(
+                    params=optimizer_grouped_parameters,
+                    **optimizer_kwargs,
+                )
+            else:
+                self.optimizer = optimizer_cls(optimizer_grouped_parameters, **optimizer_kwargs)
+                if optimizer_cls.__name__ == "Adam8bit":
+                    import bitsandbytes
 
-                manager = bitsandbytes.optim.GlobalOptimManager.get_instance()
+                    manager = bitsandbytes.optim.GlobalOptimManager.get_instance()
 
-                skipped = 0
-                for module in opt_model.modules():
-                    if isinstance(module, nn.Embedding):
-                        skipped += sum({p.data_ptr(): p.numel() for p in module.parameters()}.values())
-                        logger.info(f"skipped {module}: {skipped/2**20}M params")
-                        manager.register_module_override(module, "weight", {"optim_bits": 32})
-                        logger.debug(f"bitsandbytes: will optimize {module} in fp32")
-                logger.info(f"skipped: {skipped/2**20}M params")
+                    skipped = 0
+                    for module in opt_model.modules():
+                        if isinstance(module, torch.nn.Embedding):
+                            skipped += sum({p.data_ptr(): p.numel() for p in module.parameters()}.values())
+                            logger.info(f"skipped {module}: {skipped / 2**20}M params")
+                            manager.register_module_override(module, "weight", {"optim_bits": 32})
+                            logger.debug(f"bitsandbytes: will optimize {module} in fp32")
+                    logger.info(f"skipped: {skipped / 2**20}M params")
 
         return self.optimizer
 
@@ -235,7 +250,6 @@ class LLaVATrainer(Trainer):
             run_dir = self._get_output_dir(trial=trial)
             output_dir = os.path.join(run_dir, checkpoint_folder)
 
-            # Only save Adapter
             keys_to_match = ['mm_projector', 'vision_resampler']
             if getattr(self.args, "use_im_start_end", False):
                 keys_to_match.extend(['embed_tokens', 'embed_in'])
@@ -253,7 +267,7 @@ class LLaVATrainer(Trainer):
             pass
         else:
             super(LLaVATrainer, self)._save(output_dir, state_dict)
-    
+
     # 重写（Override） compute_loss 方法
     def compute_loss(self, model, inputs, return_outputs=False):
         # 1. 计算原生的语言模型 Loss
@@ -265,19 +279,20 @@ class LLaVATrainer(Trainer):
             routing_loss = 0.0
             layer_count = 0
             current_task_id = getattr(self.args, 'task_id', 0)
-            
+
             from llava.cl.moe_lora import MOELoraLinear
             for name, module in model.named_modules():
                 if isinstance(module, MOELoraLinear) and hasattr(module, 'saved_router_logits'):
-                    # 取出 logit 形状通常是 [batch, seq_len, expert_num]
+                    # Sample-level routing logits: typically [batch, expert_num].
                     logits = module.saved_router_logits
-                    # 构造强制指向当前 Task 的标签
-                    labels = torch.full((logits.shape[0], logits.shape[1]), current_task_id, dtype=torch.long, device=logits.device)
-                    # 计算 CrossEntropy (注意维度变换)
-                    routing_loss += torch.nn.functional.cross_entropy(logits.view(-1, logits.shape[-1]), labels.view(-1))
+                    if logits is None:
+                        continue
+                    # Build one routing target per sample.
+                    labels = torch.full((logits.shape[0],), current_task_id, dtype=torch.long, device=logits.device)
+                    routing_loss += torch.nn.functional.cross_entropy(logits, labels)
                     layer_count += 1
                     module.saved_router_logits = None  # 清理保存的 logits，防止内存泄漏
-            
+
             if layer_count > 0:
                 routing_loss = routing_loss / layer_count
                 alpha = getattr(self.args, 'router_loss_alpha', 1.0)

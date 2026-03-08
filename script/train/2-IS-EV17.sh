@@ -2,18 +2,18 @@
 
 cd /media/AI4MED1/hanjiacheng/LLaVA-CL-MOE
 
-# 【恢复】：必须使用原始的基座模型来加载结构和 Tokenizer
+# 原始基座模型参数路径
 MODEL_PATH="/media/AI4MED1/hanjiacheng/LLaVA-CL-MOE/models/llava-med-v1.5-mistral-7b"
 
-# 【新增】：专门指向上一任务 LoRA 权重的路径
-PRETRAIN_MOE_LORA_PATH="/media/AI4MED1/hanjiacheng/LLaVA-CL-MOE/checkpoints/1-IL-EV17/llava-med-v1.5-moe-lora-3.8-2"
+# 指向上一任务 LoRA 权重的路径
+PRETRAIN_MOE_LORA_PATH="/media/AI4MED1/hanjiacheng/LLaVA-CL-MOE/checkpoints/1-IL-EV17/llava-med-v1.5-moe-lora-3.8"
 
 DATA_PATH="/media/AI4MED1/hanjiacheng/Surgical-VQACL-Data/IS-EV17/instrument_state_ev17_train.json"
 IMAGE_FOLDER="/media/AI4MED1/hanjiacheng/data/EndoVis-17-VQLA/left_frames"
 VISION_TOWER_PATH="/media/AI4MED1/hanjiacheng/LLaVA-CL-MOE/models/clip-vit-large-patch14-336"
 PRETRAIN_PROJECTOR_PATH="/media/AI4MED1/hanjiacheng/LLaVA/checkpoints/upper-bound/5data/llava-med-v1.5-lora-1.29/non_lora_trainables.bin"
 
-OUTPUT_DIR="/media/AI4MED1/hanjiacheng/LLaVA-CL-MOE/checkpoints/2-IS-EV17/llava-med-v1.5-moe-lora-3.8-2"
+OUTPUT_DIR="/media/AI4MED1/hanjiacheng/LLaVA-CL-MOE/checkpoints/2-IS-EV17/llava-med-v1.5-moe-lora-3.8"
 
 deepspeed --include localhost:0,1 \
     --master_port=29701 \
@@ -61,4 +61,4 @@ deepspeed --include localhost:0,1 \
     --tune_mm_mlp_adapter False \
     --task_id 1 \
     --router_temperature 1.0 \
-    --router_loss_alpha 1.0
+    --router_loss_alpha 0.05
