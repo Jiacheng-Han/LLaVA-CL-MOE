@@ -2,7 +2,7 @@
 
 # --- 1. 显卡设置 ---
 # 指定使用哪张卡运行推理
-export CUDA_VISIBLE_DEVICES=3
+export CUDA_VISIBLE_DEVICES=0
 
 # --- 2. 路径配置 ---
 # 切换到你修改后的工程根目录
@@ -12,17 +12,18 @@ cd /media/AI4MED1/hanjiacheng/LLaVA-CL-MOE
 MODEL_BASE="/media/AI4MED1/hanjiacheng/LLaVA-CL-MOE/models/llava-med-v1.5-mistral-7b"
 
 # 指向刚训练好的路径
-MODEL_PATH="/media/AI4MED1/hanjiacheng/LLaVA-CL-MOE/checkpoints/2-IS-EV17/llava-med-v1.5-moe-lora-3.8"
+MODEL_PATH="/media/AI4MED1/hanjiacheng/LLaVA-CL-MOE/checkpoints/3-IL-EV18/llava-med-v1.5-moe-lora-3.3"
 
 # question 文件 
+# QUESTION_FILE="/media/AI4MED1/hanjiacheng/Surgical-VQACL-Data/IS-EV17/instrument_state_ev17_test.jsonl"
 # QUESTION_FILE="/media/AI4MED1/hanjiacheng/Surgical-VQACL-Data/IL-EV17/instrument_location_ev17_test.jsonl"
-QUESTION_FILE="/media/AI4MED1/hanjiacheng/Surgical-VQACL-Data/IS-EV17/instrument_state_ev17_test.jsonl"
+QUESTION_FILE="/media/AI4MED1/hanjiacheng/Surgical-VQACL-Data/IL-EV18/instrument_location_ev18_test.jsonl"
 
 # 图片文件夹 
-IMAGE_FOLDER="/media/AI4MED1/hanjiacheng/data/EndoVis-17-VQLA/left_frames"
+IMAGE_FOLDER="/media/AI4MED1/hanjiacheng/data/EndoVis-18-VQLA"
 
 # 结果保存文件 (修改为当前工程的 output)
-ANSWERS_FILE="/media/AI4MED1/hanjiacheng/LLaVA-CL-MOE/output/2-IS-EV17/3.8/IS-EV17.jsonl"
+ANSWERS_FILE="/media/AI4MED1/hanjiacheng/LLaVA-CL-MOE/output/3-IL-EV18/3.3/IL-EV18.jsonl"
 
 # --- 3. 运行推理 ---  
 python -m llava.eval.model_vqa \

@@ -72,17 +72,10 @@ def calculate_word_recall(pred_file, gt_file):
     return mean_recall
 
 if __name__ == "__main__":
-    # parser = argparse.ArgumentParser(description="计算模型推理结果的 Word-level Recall")
-    # parser.add_argument("--pred_file", type=str, required=True, help="推理生成的 .jsonl 文件路径")
-    # parser.add_argument("--gt_file", type=str, required=True, help="包含 Ground Truth 的 .json 文件路径")
+    parser = argparse.ArgumentParser(description="计算模型推理结果的 Word-level Recall")
+    parser.add_argument("--pred_file", type=str, required=True, help="推理生成的 .jsonl 文件路径")
+    parser.add_argument("--gt_file", type=str, required=True, help="包含 Ground Truth 的 .json 文件路径")
     
-    # args = parser.parse_args()
-
-    # 建议使用绝对路径，避免找不到文件
-    PRED_FILE = "/media/AI4MED1/hanjiacheng/LLaVA-CL-MOE/output/2-IS-EV17/3.1/IS-EV17.jsonl"
-    GT_FILE = "/media/AI4MED1/hanjiacheng/Surgical-VQACL-Data/IS-EV17/instrument_state_ev17_test.json"
+    args = parser.parse_args()
     
-    if os.path.exists(PRED_FILE) and os.path.exists(GT_FILE):
-        score = calculate_word_recall(PRED_FILE, GT_FILE)
-    else:
-        print("错误：请检查文件路径是否正确！其中有一个或多个文件不存在。")
+    score = calculate_word_recall(args.pred_file, args.gt_file)

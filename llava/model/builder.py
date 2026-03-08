@@ -24,7 +24,7 @@ from llava.constants import DEFAULT_IMAGE_PATCH_TOKEN, DEFAULT_IM_START_TOKEN, D
 
 import json
 import os
-from llava.cl.moe_lora import MOELoraConfig, MOELoraModel, MOELoraLinear
+from llava.cl.moe_lora import MOELoraConfig, MOELoraModel, MOELoraLinear, normalize_moe_lora_state_dict
 
 
 def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, load_4bit=False, device_map="auto", device="cuda", use_flash_attn=False, **kwargs):
@@ -102,7 +102,7 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
                 lora_cfg_dict.pop("auto_mapping", None)
                 lora_config = MOELoraConfig(**lora_cfg_dict)
             else:
-                lora_config = MOELoraConfig(r=128, lora_alpha=256, target_modules=["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "down_proj", "up_proj"])
+                lora_config = MOELoraConfig(r=64, lora_alpha=128, target_modules=["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "down_proj", "up_proj"])
             
             # 使用我们的 Wrapper 接管基座模型
             model = MOELoraModel(model, lora_config, "default")
@@ -118,6 +118,15 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
                 state_dict = load_file(weight_path)
             else:
                 state_dict = torch.load(weight_path, map_location='cpu')
+
+            state_dict, router_stats = normalize_moe_lora_state_dict(state_dict)
+            if router_stats.get("legacy_router_keys_seen", 0) > 0:
+                print(
+                    "Normalized legacy router keys: "
+                    f"seen={router_stats['legacy_router_keys_seen']}, "
+                    f"converted_groups={router_stats['legacy_router_groups_converted']}, "
+                    f"dropped={router_stats['legacy_router_keys_dropped']}"
+                )
                 
             # 探测当前 checkpoint 包含几个专家 (计算最大索引)
             max_expert_idx = 0
@@ -152,7 +161,8 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
                     # 将自定义的 ModuleList 统统搬过去
                     module.lora_A_experts.to(device=target_device, dtype=target_dtype)
                     module.lora_B_experts.to(device=target_device, dtype=target_dtype)
-                    module.lora_routers.to(device=target_device, dtype=target_dtype)
+                    if module.lora_router is not None:
+                        module.lora_router.to(device=target_device, dtype=target_dtype)
             # ==================================================================
             
             print('Model is loaded... (Skipped merge_and_unload for dynamic MoE)')

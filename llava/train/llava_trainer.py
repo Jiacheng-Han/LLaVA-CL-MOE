@@ -276,7 +276,7 @@ class LLaVATrainer(Trainer):
                     # 计算 CrossEntropy (注意维度变换)
                     routing_loss += torch.nn.functional.cross_entropy(logits.view(-1, logits.shape[-1]), labels.view(-1))
                     layer_count += 1
-            module.saved_router_logits = None  # 清理保存的 logits，防止内存泄漏
+                    module.saved_router_logits = None  # 清理保存的 logits，防止内存泄漏
             
             if layer_count > 0:
                 routing_loss = routing_loss / layer_count

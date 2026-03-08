@@ -111,7 +111,6 @@ class TrainingArguments(transformers.TrainingArguments):
     mm_projector_lr: Optional[float] = None
     group_by_modality_length: bool = field(default=False)
 
-    # 新增cl-moe参数
     task_id: int = field(default=0, metadata={"help": "Current continual learning task ID (0 for the first task)."})
     router_temperature: float = field(default=1.0, metadata={"help": "Temperature for MoE routing Gumbel-Softmax."})
     router_loss_alpha: float = field(default=1.0, metadata={"help": "Weight of the routing loss."})
@@ -796,6 +795,12 @@ def train(attn_implementation=None):
     parser = transformers.HfArgumentParser(
         (ModelArguments, DataArguments, TrainingArguments))
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+
+    # --- 新增：固定随机种子 ---
+    # training_args.seed 默认值为 42，也可以通过命令行参数 --seed 指定
+    transformers.set_seed(training_args.seed) 
+    # -----------------------
+
     local_rank = training_args.local_rank
     compute_dtype = (torch.float16 if training_args.fp16 else (torch.bfloat16 if training_args.bf16 else torch.float32))
 
@@ -881,7 +886,12 @@ def train(attn_implementation=None):
     #     model = get_peft_model(model, lora_config)
 
     if training_args.lora_enable:
-        from llava.cl.moe_lora import MOELoraConfig, MOELoraModel, MOELoraLinear
+        from llava.cl.moe_lora import (
+            MOELoraConfig,
+            MOELoraModel,
+            MOELoraLinear,
+            normalize_moe_lora_state_dict,
+        )
         lora_config = MOELoraConfig(
             r=training_args.lora_r,
             lora_alpha=training_args.lora_alpha,
@@ -899,9 +909,8 @@ def train(attn_implementation=None):
                 model.to(torch.float16)
         rank0_print("Adding MoE LoRA adapters...")
         model = MOELoraModel(model, lora_config, "default")
-        # 【核心新增：在扩增专家前，将上一轮任务的知识灌入模型】
+        old_state_dict = None
         if getattr(training_args, 'pretrained_moe_lora_path', None) is not None:
-            # 兼容 HuggingFace 的标准命名和 PEFT 的特殊命名
             possible_files = [
                 "model.safetensors", 
                 "adapter_model.safetensors",
@@ -909,7 +918,6 @@ def train(attn_implementation=None):
                 "adapter_model.bin"
             ]
             
-            old_state_dict = None
             rank0_print(f"Continual Learning: Loading previous experts from {training_args.pretrained_moe_lora_path}")
             
             for file_name in possible_files:
@@ -921,30 +929,32 @@ def train(attn_implementation=None):
                         old_state_dict = load_file(file_path)
                     else:
                         old_state_dict = torch.load(file_path, map_location="cpu")
-                    break # 找到一个就跳出循环
-            
+                    break      
             if old_state_dict is not None:
-                # strict=False 允许只加载我们自定义的 lora 权重字典，忽略非相关的键
-                missing_keys, unexpected_keys = model.load_state_dict(old_state_dict, strict=False)
-                rank0_print(f"Loaded previous MoE LoRA weights. (Unexpected keys count: {len(unexpected_keys)})")
+                old_state_dict, router_stats = normalize_moe_lora_state_dict(old_state_dict)
+                if router_stats.get("legacy_router_keys_seen", 0) > 0:
+                    rank0_print(
+                        "Normalized legacy router keys: "
+                        f"seen={router_stats['legacy_router_keys_seen']}, "
+                        f"converted_groups={router_stats['legacy_router_groups_converted']}, "
+                        f"dropped={router_stats['legacy_router_keys_dropped']}"
+                    )
             else:
                 rank0_print("WARNING: Could not find any valid weight file in pretrained_moe_lora_path!")
 
-        # 传入了当前的 task_id (0表示第一个任务，1表示第二个...)
         current_task_id = getattr(training_args, 'task_id', 0)
 
-        # 1. 【新增】先扩容补齐旧任务的 Expert 坑位，确保能够承接旧权重
-        # 注意：初始化自带1个，所以再补加 current_task_id - 1 个
+        # Expand slots for previous tasks first (module already has one expert by default).
         for _ in range(current_task_id - 1):
             for name, module in model.named_modules():
                 if isinstance(module, MOELoraLinear):
                     module.add_new_task_expert()
 
-        # 2. 【原代码】加载上一轮的权重 (此时 strict=False 不会再误删旧专家)
-        if getattr(training_args, 'pretrained_moe_lora_path', None) is not None:
+        # Load all previous-task expert/router weights.
+        if getattr(training_args, 'pretrained_moe_lora_path', None) is not None and old_state_dict is not None:
             missing_keys, unexpected_keys = model.load_state_dict(old_state_dict, strict=False)
 
-        # 3. 【修改位置】最后再为【本次即将训练的新任务】单独建一个新 Expert
+        # Add one new expert for the current task.
         if current_task_id > 0:
             for name, module in model.named_modules():
                 if isinstance(module, MOELoraLinear):
@@ -1041,7 +1051,6 @@ def train(attn_implementation=None):
     if list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")):
         trainer.train(resume_from_checkpoint=True)
     else:
-        # ============== 新增：打印模型参数状态的检查代码 ==============
         def print_trainable_parameters(model):
             trainable_param_names = []
             trainable_params = 0
@@ -1058,7 +1067,6 @@ def train(attn_implementation=None):
             rank0_print(f"Trainable %: {100 * trainable_params / all_param:.4f}%")
             rank0_print("="*50)
             rank0_print("Trainable Layers (Top 50 displayed):")
-            # 打印前50个可训练的层，防止日志太长
             for name in trainable_param_names[:50]:
                 rank0_print(f"  -> {name}")
             if len(trainable_param_names) > 50:

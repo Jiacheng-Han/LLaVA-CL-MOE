@@ -6,16 +6,17 @@ cd /media/AI4MED1/hanjiacheng/LLaVA-CL-MOE
 MODEL_PATH="/media/AI4MED1/hanjiacheng/LLaVA-CL-MOE/models/llava-med-v1.5-mistral-7b"
 
 # 【新增】：专门指向上一任务 LoRA 权重的路径
-PRETRAIN_MOE_LORA_PATH="/media/AI4MED1/hanjiacheng/LLaVA-CL-MOE/checkpoints/1-IL-EV17/llava-med-v1.5-moe-lora-2.28"
+PRETRAIN_MOE_LORA_PATH="/media/AI4MED1/hanjiacheng/LLaVA-CL-MOE/checkpoints/1-IL-EV17/llava-med-v1.5-moe-lora-3.8-2"
 
 DATA_PATH="/media/AI4MED1/hanjiacheng/Surgical-VQACL-Data/IS-EV17/instrument_state_ev17_train.json"
 IMAGE_FOLDER="/media/AI4MED1/hanjiacheng/data/EndoVis-17-VQLA/left_frames"
 VISION_TOWER_PATH="/media/AI4MED1/hanjiacheng/LLaVA-CL-MOE/models/clip-vit-large-patch14-336"
 PRETRAIN_PROJECTOR_PATH="/media/AI4MED1/hanjiacheng/LLaVA/checkpoints/upper-bound/5data/llava-med-v1.5-lora-1.29/non_lora_trainables.bin"
 
-OUTPUT_DIR="/media/AI4MED1/hanjiacheng/LLaVA-CL-MOE/checkpoints/2-IS-EV17/llava-med-v1.5-moe-lora-3.1"
+OUTPUT_DIR="/media/AI4MED1/hanjiacheng/LLaVA-CL-MOE/checkpoints/2-IS-EV17/llava-med-v1.5-moe-lora-3.8-2"
 
-deepspeed --include localhost:2,3 \
+deepspeed --include localhost:0,1 \
+    --master_port=29701 \
     llava/train/train_mem.py \
     --deepspeed /media/AI4MED1/hanjiacheng/LLaVA-CL-MOE/script/zero2.json \
     --model_name_or_path $MODEL_PATH \
@@ -54,8 +55,8 @@ deepspeed --include localhost:2,3 \
     --report_to tensorboard \
     --seed 42 \
     --lora_enable True \
-    --lora_r 128 \
-    --lora_alpha 256 \
+    --lora_r 64 \
+    --lora_alpha 128 \
     --freeze_mm_mlp_adapter True \
     --tune_mm_mlp_adapter False \
     --task_id 1 \
