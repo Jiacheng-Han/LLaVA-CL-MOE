@@ -7,7 +7,6 @@ venv/
 .vscode/
 models/
 checkpoints/
-output/
 
 # Large model files
 *.pth
