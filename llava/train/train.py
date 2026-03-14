@@ -115,6 +115,14 @@ class TrainingArguments(transformers.TrainingArguments):
     router_temperature: float = field(default=1.0, metadata={"help": "Temperature for MoE routing Gumbel-Softmax."})
     router_loss_alpha: float = field(default=1.0, metadata={"help": "Weight of the routing loss."})
     pretrained_moe_lora_path: Optional[str] = field(default=None, metadata={"help": "Path to previous task's MoE LoRA weights."})
+    save_full_model_at_end: bool = field(
+        default=False,
+        metadata={"help": "Save a full model state dict (all parameters) at the end of training. This can be very large."},
+    )
+    full_model_filename: str = field(
+        default="full_model_state.pt",
+        metadata={"help": "Filename of the full model state dict saved under output_dir."},
+    )
 
 def maybe_zero_3(param, ignore_status=False, name=None):
     from deepspeed import zero
@@ -168,6 +176,15 @@ def get_mm_adapter_state_maybe_zero_3(named_params, keys_to_match):
     to_return = {k: t for k, t in named_params if any(key_match in k for key_match in keys_to_match)}
     to_return = {k: maybe_zero_3(v, ignore_status=True).cpu() for k, v in to_return.items()}
     return to_return
+
+
+def get_full_state_maybe_zero_3(model):
+    full_state = {}
+    for name, param in model.named_parameters():
+        full_state[name] = maybe_zero_3(param, ignore_status=True, name=name).cpu()
+    for name, buf in model.named_buffers():
+        full_state[name] = buf.detach().cpu().clone()
+    return full_state
 
 
 def find_all_linear_names(model):
@@ -1095,6 +1112,14 @@ def train(attn_implementation=None):
     else:
         safe_save_model_for_hf_trainer(trainer=trainer,
                                        output_dir=training_args.output_dir)
+
+    if getattr(training_args, "save_full_model_at_end", False):
+        if training_args.local_rank == 0 or training_args.local_rank == -1:
+            rank0_print("Saving full model state dict (all parameters). This may take a while...")
+            full_state_dict = get_full_state_maybe_zero_3(model)
+            full_model_path = os.path.join(training_args.output_dir, training_args.full_model_filename)
+            torch.save(full_state_dict, full_model_path)
+            rank0_print(f"Full model state dict saved to: {full_model_path}")
 
 
 if __name__ == "__main__":

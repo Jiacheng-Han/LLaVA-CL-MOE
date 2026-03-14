@@ -6,14 +6,14 @@ cd /media/AI4MED1/hanjiacheng/LLaVA-CL-MOE
 MODEL_PATH="/media/AI4MED1/hanjiacheng/LLaVA-CL-MOE/models/llava-med-v1.5-mistral-7b"
 
 # 指向上一任务 LoRA 权重的路径
-PRETRAIN_MOE_LORA_PATH="/media/AI4MED1/hanjiacheng/LLaVA-CL-MOE/checkpoints/1-IL-EV17/llava-med-v1.5-moe-lora-3.8"
+PRETRAIN_MOE_LORA_PATH="/media/AI4MED1/hanjiacheng/LLaVA-CL-MOE/checkpoints/1-IL-EV17/llava-med-v1.5-moe-lora-3.11"
 
 DATA_PATH="/media/AI4MED1/hanjiacheng/Surgical-VQACL-Data/IS-EV17/instrument_state_ev17_train.json"
 IMAGE_FOLDER="/media/AI4MED1/hanjiacheng/data/EndoVis-17-VQLA/left_frames"
 VISION_TOWER_PATH="/media/AI4MED1/hanjiacheng/LLaVA-CL-MOE/models/clip-vit-large-patch14-336"
 PRETRAIN_PROJECTOR_PATH="/media/AI4MED1/hanjiacheng/LLaVA/checkpoints/upper-bound/5data/llava-med-v1.5-lora-1.29/non_lora_trainables.bin"
 
-OUTPUT_DIR="/media/AI4MED1/hanjiacheng/LLaVA-CL-MOE/checkpoints/2-IS-EV17/llava-med-v1.5-moe-lora-3.8"
+OUTPUT_DIR="/media/AI4MED1/hanjiacheng/LLaVA-CL-MOE/checkpoints/2-IS-EV17/llava-med-v1.5-moe-lora-3.11-2"
 
 deepspeed --include localhost:0,1 \
     --master_port=29701 \
@@ -34,14 +34,13 @@ deepspeed --include localhost:0,1 \
     --group_by_modality_length True \
     --bf16 True \
     --output_dir $OUTPUT_DIR \
-    --num_train_epochs 100 \
-    --per_device_train_batch_size 8 \
+    --num_train_epochs 30 \
+    --per_device_train_batch_size 32 \
     --per_device_eval_batch_size 4 \
-    --gradient_accumulation_steps 8 \
+    --gradient_accumulation_steps 1 \
     --evaluation_strategy "no" \
-    --save_strategy "steps" \
-    --save_steps 5000 \
-    --save_total_limit 1 \
+    --save_strategy "epoch" \
+    --save_total_limit 100 \
     --learning_rate 2e-4 \
     --weight_decay 0. \
     --warmup_ratio 0.03 \
@@ -61,4 +60,5 @@ deepspeed --include localhost:0,1 \
     --tune_mm_mlp_adapter False \
     --task_id 1 \
     --router_temperature 1.0 \
-    --router_loss_alpha 0.05
+    --router_loss_alpha 0.0 \
+    --save_full_model_at_end True

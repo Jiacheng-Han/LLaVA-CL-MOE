@@ -1,8 +1,7 @@
-# -*- coding: utf-8 -*-
+# -*- encoding: utf-8 -*-
 import math
-import warnings
+import copy
 from dataclasses import dataclass, field
-from typing import Dict, Tuple, Optional
 
 import torch
 import torch.nn as nn
@@ -10,22 +9,14 @@ import torch.nn.functional as F
 
 from peft.tuners.lora import LoraConfig, LoraLayer, LoraModel
 
-try:
-    from peft.tuners.lora import Linear8bitLt, Linear4bit
-    import bitsandbytes as bnb
-    is_bnb_available = True
-except ImportError:
-    is_bnb_available = False
-
 
 @dataclass
 class MOELoraConfig(LoraConfig):
     """
-    Configuration class for MoE LoRA.
+    Configuration class for MOE LoRA.
     """
-
-    task_embedding_dim: int = field(default=64)
-    expert_num: int = field(default=4)
+    task_embedding_dim: int = field(default=64)   # 当前版本未使用，先保留
+    expert_num: int = field(default=4)            # 当前版本不做硬限制，先保留
     router_temperature: float = field(default=1.0)
 
     def __post_init__(self):
@@ -35,14 +26,13 @@ class MOELoraConfig(LoraConfig):
 
 class MOELoraModel(LoraModel):
     """
-    Wrapper that swaps target Linear layers to MOELoraLinear.
+    模型构建与替换类
     """
-
     def __init__(self, model, config, adapter_name):
         super().__init__(model, config, adapter_name)
 
     def _create_new_module(self, lora_config, adapter_name, target, **kwargs):
-        if isinstance(target, nn.Linear):  # 针对每个线性层进行处理替换
+        if isinstance(target, nn.Linear):
             return MOELoraLinear(
                 base_layer=target,
                 adapter_name=adapter_name,
@@ -51,114 +41,16 @@ class MOELoraModel(LoraModel):
                 lora_dropout=lora_config.lora_dropout,
                 router_temperature=getattr(lora_config, "router_temperature", 1.0),
             )
-        raise ValueError(f"Target module {target} is not supported. Only nn.Linear is supported.")
-
-def normalize_moe_lora_state_dict(
-    state_dict: Dict[str, torch.Tensor],
-) -> Tuple[Dict[str, torch.Tensor], Dict[str, int]]:
-    """
-    Normalize legacy MoE LoRA router keys to current format.
-
-    Current format:
-      - *.lora_router.weight: [K, d]
-      - *.lora_router.bias:   [K]
-
-    Legacy compatible format:
-      - *.lora_routers.{k}.weight: [1, d] / [d]
-      - *.lora_routers.{k}.bias:   [1] / scalar
-
-    Unsupported legacy router keys (e.g., multi-layer head like
-    lora_routers.{k}.0.weight) are dropped intentionally.
-    """
-
-    if state_dict is None:
-        return state_dict, {"legacy_router_keys_dropped": 0, "legacy_router_groups_converted": 0}
-
-    normalized: Dict[str, torch.Tensor] = {}
-    processed_legacy_keys = set()
-    linear_legacy_keys = set()
-    legacy_router_keys_seen = 0
-    converted_groups = 0
-
-    # prefix -> {"weight": {idx: tensor}, "bias": {idx: tensor}}
-    legacy_linear_router_groups: Dict[str, Dict[str, Dict[int, torch.Tensor]]] = {}
-
-    for key, value in state_dict.items():
-        if ".lora_routers." not in key:
-            normalized[key] = value
-            continue
-        legacy_router_keys_seen += 1
-
-        prefix, suffix = key.split(".lora_routers.", 1)
-        suffix_parts = suffix.split(".")
-        if len(suffix_parts) == 2 and suffix_parts[0].isdigit() and suffix_parts[1] in ("weight", "bias"):
-            expert_idx = int(suffix_parts[0])
-            wb = suffix_parts[1]
-            if prefix not in legacy_linear_router_groups:
-                legacy_linear_router_groups[prefix] = {"weight": {}, "bias": {}}
-            legacy_linear_router_groups[prefix][wb][expert_idx] = value
-            processed_legacy_keys.add(key)
-            linear_legacy_keys.add(key)
-            continue
-
-        # Unsupported legacy key style; keep it dropped on purpose.
-        processed_legacy_keys.add(key)
-
-    for prefix, group in legacy_linear_router_groups.items():
-        if not group["weight"]:
-            continue
-
-        sorted_indices = sorted(group["weight"].keys())
-        weight_rows = []
-        bias_rows = []
-        can_use_bias = len(group["bias"]) == len(sorted_indices)
-
-        for idx in sorted_indices:
-            w = group["weight"][idx]
-            if w.dim() == 2 and w.shape[0] == 1:
-                w = w.squeeze(0)
-            elif w.dim() == 1:
-                w = w
-            else:
-                # Invalid shape for linear-head router conversion, skip this group.
-                weight_rows = []
-                bias_rows = []
-                break
-
-            weight_rows.append(w)
-
-            if can_use_bias:
-                b = group["bias"][idx]
-                if b.dim() == 1 and b.numel() == 1:
-                    b = b.reshape(())
-                elif b.dim() == 0:
-                    b = b
-                else:
-                    can_use_bias = False
-                bias_rows.append(b)
-
-        if not weight_rows:
-            continue
-
-        normalized[f"{prefix}.lora_router.weight"] = torch.stack(weight_rows, dim=0)
-        if can_use_bias and len(bias_rows) == len(weight_rows):
-            normalized[f"{prefix}.lora_router.bias"] = torch.stack([b.reshape(1) for b in bias_rows], dim=0).reshape(-1)
-        converted_groups += 1
-
-    dropped_legacy = legacy_router_keys_seen - len(linear_legacy_keys)
-    return normalized, {
-        "legacy_router_keys_seen": legacy_router_keys_seen,
-        "legacy_router_keys_dropped": dropped_legacy,
-        "legacy_router_groups_converted": converted_groups,
-    }
+        else:
+            raise ValueError(
+                f"Target module {target} is not supported. Only nn.Linear is supported."
+            )
 
 
 class MOELoraLayer(LoraLayer):
     """
-    Core data structure for experts + matrix router.
-    Router form: softmax(x @ Wmix), where Wmix in R^(d x K).
+    管理多个 LoRA expert + 线性 router
     """
-
     def __init__(
         self,
         base_layer: nn.Module,
@@ -180,90 +72,128 @@ class MOELoraLayer(LoraLayer):
 
         self.in_features = in_features
         self.out_features = out_features
-        self.lora_dropout_layer = nn.Dropout(p=lora_dropout) if lora_dropout > 0.0 else nn.Identity()
 
+        if lora_dropout > 0.0:
+            self.lora_dropout_layer = nn.Dropout(p=lora_dropout)
+        else:
+            self.lora_dropout_layer = nn.Identity()
+
+        # 多专家 LoRA
         self.lora_A_experts = nn.ModuleList([])
         self.lora_B_experts = nn.ModuleList([])
 
-        # 矩阵路由: Linear(d, K), expanded to K+1 on new task.
-        self.lora_router: Optional[nn.Linear] = None
-
-        # Keep grad-mask hooks to freeze old router columns while training the new one.
-        self._router_weight_hook = None
-        self._router_bias_hook = None
+        # 关键改动：
+        # 1) router 保存“历史所有已固定专家”的路由，形状 Linear(in_features, num_fixed_experts)
+        # 2) new_router 只给当前新加专家临时训练，形状 Linear(in_features, 1)
+        self.router = None
+        self.new_router = None
 
         self.current_expert_num = 0
-        self.saved_router_logits = None
 
     @property
-    def lora_routers(self):
-        """
-        Backward-compatible alias for old external calls (e.g., builder device cast).
-        """
-        return self.lora_router
+    def num_experts(self):
+        return self.current_expert_num
 
-    def _remove_router_hooks(self):
-        if self._router_weight_hook is not None:
-            self._router_weight_hook.remove()
-            self._router_weight_hook = None
-        if self._router_bias_hook is not None:
-            self._router_bias_hook.remove()
-            self._router_bias_hook = None
+    def _make_single_router(self, device=None, dtype=None):
+        layer = nn.Linear(self.in_features, 1, bias=True)
+        nn.init.normal_(layer.weight, std=0.02)
+        nn.init.zeros_(layer.bias)
+        if device is not None:
+            layer = layer.to(device=device, dtype=dtype)
+        return layer
 
-    def _new_router(self, out_dim: int, device: torch.device, dtype: torch.dtype) -> nn.Linear:
-        router = nn.Linear(self.in_features, out_dim, bias=True)
-        nn.init.normal_(router.weight, std=0.02)
-        nn.init.zeros_(router.bias)
-        router = router.to(device=device, dtype=dtype)
-        return router
-
-    def _set_trainable_router_column(self, col_idx: int):
-        # register hook，只让 col_idx 列梯度更新
-        if self.lora_router is None:
-            return
-
-        self._remove_router_hooks()
-        for param in self.lora_router.parameters():
-            param.requires_grad = True
-            param.grad = None
-
-        def weight_hook(grad):
-            mask = torch.zeros_like(grad)
-            mask[col_idx, :] = 1.0
-            return grad * mask
-
-        def bias_hook(grad):
-            mask = torch.zeros_like(grad)
-            mask[col_idx] = 1.0
-            return grad * mask
-
-        self._router_weight_hook = self.lora_router.weight.register_hook(weight_hook)
-        self._router_bias_hook = self.lora_router.bias.register_hook(bias_hook)
-
-    def _expand_router(self):
-        if self.lora_router is None:
-            base_weight = self.base_layer.weight
-            self.lora_router = self._new_router(
-                out_dim=1,
-                device=base_weight.device,
-                dtype=base_weight.dtype,
-            )
-            return
-
-        old_router = self.lora_router
-        old_k = old_router.out_features
-        new_router = self._new_router(
-            out_dim=old_k + 1,
-            device=old_router.weight.device,
-            dtype=old_router.weight.dtype,
-        )
-        with torch.no_grad():
-            new_router.weight[:old_k].copy_(old_router.weight)
-            new_router.bias[:old_k].copy_(old_router.bias)
-        self.lora_router = new_router
+    def _make_multi_router(self, out_dim: int, device=None, dtype=None):
+        layer = nn.Linear(self.in_features, out_dim, bias=True)
+        nn.init.normal_(layer.weight, std=0.02)
+        nn.init.zeros_(layer.bias)
+        if device is not None:
+            layer = layer.to(device=device, dtype=dtype)
+        return layer
 
     def add_new_task_expert(self):
-        # Freeze all old experts.
+        """
+        新任务到来时：
+        1. 冻结旧 expert
+        2. 新增一个 expert
+        3. 如果这是第一个 expert，则创建 router = Linear(in_features, 1)
+        4. 如果不是第一个 expert，则创建 new_router = Linear(in_features, 1)
+           等任务训练结束后再 merge 到 router 里
+        """
+        # 冻结旧专家
+        for p in self.lora_A_experts.parameters():
+            p.requires_grad = False
+        for p in self.lora_B_experts.parameters():
+            p.requires_grad = False
+
+        # 冻结旧 router
+        if self.router is not None:
+            for p in self.router.parameters():
+                p.requires_grad = False
+
+        # 清理旧 new_router（正常流程下不会残留；防御式处理）
+        if self.new_router is not None:
+            for p in self.new_router.parameters():
+                p.requires_grad = False
+
+        # 新增当前任务 expert
+        new_A = nn.Linear(self.in_features, self.r_val, bias=False)
+        new_B = nn.Linear(self.r_val, self.out_features, bias=False)
+
+        nn.init.kaiming_uniform_(new_A.weight, a=math.sqrt(5))
+        nn.init.zeros_(new_B.weight)
+
+        # 对齐 device / dtype
+        device = self.base_layer.weight.device
+        dtype = self.base_layer.weight.dtype
+        new_A = new_A.to(device=device, dtype=dtype)
+        new_B = new_B.to(device=device, dtype=dtype)
+
+        self.lora_A_experts.append(new_A)
+        self.lora_B_experts.append(new_B)
+
+        # router 逻辑
+        if self.current_expert_num == 0:
+            # 第一个 expert：直接建总 router（1维）
+            self.router = self._make_multi_router(1, device=device, dtype=dtype)
+            self.new_router = None
+        else:
+            # 后续 expert：只为当前 expert 建一个临时 new_router
+            self.new_router = self._make_single_router(device=device, dtype=dtype)
+
+        self.current_expert_num += 1
+
+    def fix_router(self):
+        """
+        任务训练结束后，把 new_router 合并到 router 中：
+        old: Linear(in_features, N-1)
+        new: Linear(in_features, 1)
+        => merged: Linear(in_features, N)
+        """
+        if self.new_router is None:
+            return
+
+        if self.router is None:
+            raise RuntimeError("router is None while new_router exists, which is invalid.")
+
+        device = self.router.weight.device
+        dtype = self.router.weight.dtype
+
+        old_out_dim = self.router.out_features
+        merged_router = nn.Linear(self.in_features, old_out_dim + 1, bias=True).to(
+            device=device, dtype=dtype
+        )
+
+        with torch.no_grad():
+            merged_router.weight[:old_out_dim].copy_(self.router.weight.data)
+            merged_router.bias[:old_out_dim].copy_(self.router.bias.data)
+
+            merged_router.weight[old_out_dim:old_out_dim + 1].copy_(self.new_router.weight.data)
+            merged_router.bias[old_out_dim:old_out_dim + 1].copy_(self.new_router.bias.data)
+
+        self.router = merged_router
+        self.new_router = None
+
+    def freeze_experts(self):
         for p in self.lora_A_experts.parameters():
             p.requires_grad = False
             p.grad = None
@@ -271,33 +201,30 @@ class MOELoraLayer(LoraLayer):
             p.requires_grad = False
             p.grad = None
 
-        # Add one new expert for the incoming task.
-        new_A = nn.Linear(self.in_features, self.r_val, bias=False)
-        new_B = nn.Linear(self.r_val, self.out_features, bias=False)
-        nn.init.kaiming_uniform_(new_A.weight, a=math.sqrt(5))
-        nn.init.zeros_(new_B.weight)
+    def freeze_router(self):
+        if self.router is not None:
+            for p in self.router.parameters():
+                p.requires_grad = False
+                p.grad = None
+        if self.new_router is not None:
+            for p in self.new_router.parameters():
+                p.requires_grad = False
+                p.grad = None
 
-        if hasattr(self.base_layer, "weight"):
-            target_device = self.base_layer.weight.device
-            target_dtype = self.base_layer.weight.dtype
-            new_A = new_A.to(device=target_device, dtype=target_dtype)
-            new_B = new_B.to(device=target_device, dtype=target_dtype)
+    def end_of_task_training(self):
+        """
+        1. 如果有 new_router，先 merge
+        2. 冻结所有 expert
+        3. 冻结 router
+        """
+        if self.new_router is not None:
+            self.fix_router()
 
-        self.lora_A_experts.append(new_A)
-        self.lora_B_experts.append(new_B)
-        self.current_expert_num += 1
-
-        # Expand matrix router from K to K+1, then only train the new column.
-        self._expand_router()
-        self._set_trainable_router_column(self.current_expert_num - 1)
+        self.freeze_experts()
+        self.freeze_router()
 
 
 class MOELoraLinear(nn.Module, MOELoraLayer):
-    """
-    Replaced linear layer that applies:
-    base_layer(x) + scaling * sum_k softmax(router(x))_k * expert_k(x)
-    """
-
     def __init__(
         self,
         base_layer: nn.Module,
@@ -309,6 +236,7 @@ class MOELoraLinear(nn.Module, MOELoraLayer):
         **kwargs,
     ):
         nn.Module.__init__(self)
+
         MOELoraLayer.__init__(
             self,
             base_layer=base_layer,
@@ -318,75 +246,93 @@ class MOELoraLinear(nn.Module, MOELoraLayer):
             lora_alpha=lora_alpha,
             lora_dropout=lora_dropout,
         )
+
         self._active_adapter = adapter_name
         self.router_temperature = router_temperature
+
+        # 初始加载时创建第一个 expert + router
         self.add_new_task_expert()
 
     def update_layer(self, *args, **kwargs):
-        # Keep compatibility with PEFT internal calls.
+        # 拦截 PEFT 默认 update_layer 行为
         pass
+
+    def _compute_router_logits(self, x_router: torch.Tensor):
+        """
+        - 历史专家：直接走已合并好的 self.router
+        - 当前新专家：如果存在 self.new_router，则再拼一个 1 维 logits
+        """
+        if self.router is None:
+            raise RuntimeError("router has not been initialized.")
+
+        logits = self.router(x_router)  # [..., num_fixed_experts]
+
+        if self.new_router is not None:
+            new_logits = self.new_router(x_router)  # [..., 1]
+            logits = torch.cat([logits, new_logits], dim=-1)
+
+        return logits
 
     def forward(self, x: torch.Tensor, *args, **kwargs):
         previous_dtype = x.dtype
+
+        # base layer 输出
         result = self.base_layer(x, *args, **kwargs)
 
-        if self.current_expert_num == 0 or self.r_val == 0 or self.lora_router is None:
+        if self.current_expert_num == 0 or self.r_val == 0:
             return result.to(previous_dtype)
 
-        x_lora = x.to(self.lora_A_experts[0].weight.dtype)
+        expert_dtype = self.lora_A_experts[0].weight.dtype
+        x_lora = x.to(expert_dtype)
+
+        # dropout
         x_dropped = self.lora_dropout_layer(x_lora)
 
-        # Router: use sample-level routing by pooling token states first.
-        # [B, T, D] -> [B, D], then obtain one shared expert mixture per sample.
+        # # 只有一个 expert 时，不走 router softmax，直接使用该 expert
+        # if self.current_expert_num == 1 and self.new_router is None:
+        #     self.saved_router_logits = None
+        #     lora_out = self._compute_single_expert(x_dropped, 0)
+        #     result = result + (lora_out * self.scaling_val).to(previous_dtype)
+        #     return result
+
+        # router 输入：
+        # 不对每个 token 单独过各自 router，
+        # 而是先做 token 维聚合，再一次性得到 expert logits（sample-level）
+        
+        # 如果 x 是 [B, T, C]，则取 mean(dim=1) => [B, C]
+        # 如果 x 是 [B, C]，则直接用
         if x_lora.dim() == 3:
-            router_input = x_lora.mean(dim=1)
+            x_router = x_lora.mean(dim=1)
+        elif x_lora.dim() == 2:
+            x_router = x_lora
         else:
-            router_input = x_lora
+            raise ValueError(f"Unsupported input shape for router: {x_lora.shape}")
 
-        router_logits = self.lora_router(router_input)  # [B, K] or [*, K]
+        router_logits = self._compute_router_logits(x_router)
         self.saved_router_logits = router_logits
-        router_weights = F.softmax(router_logits / self.router_temperature, dim=-1)
 
-        # force_expert = 1 # 强制使用指定个专家（仅用于测试）
-        # if not self.training:
-        #     if 0 <= force_expert < self.current_expert_num:
-        #         forced = torch.zeros_like(router_weights)
-        #         forced[..., force_expert] = 1.0
-        #         router_weights = forced
+        router_weights = F.softmax(
+            router_logits / self.router_temperature,
+            dim=-1
+        ).to(expert_dtype)  # [B, E]
 
-        # 选择top-1专家
-        if not self.training:
-            # top-1 expert selection at inference
-            top1_idx = router_weights.argmax(dim=-1)   # [B] or [...]
-            one_hot = torch.zeros_like(router_weights)
-            one_hot.scatter_(-1, top1_idx.unsqueeze(-1), 1.0)
-            router_weights = one_hot
+        # 累加各 expert 输出
+        lora_out = torch.zeros_like(result, dtype=expert_dtype)
 
-        # 查看权重
-        # if not self.training:
-        #     if not hasattr(self, "router_stat"):
-        #         self.router_stat = torch.zeros(router_weights.shape[-1], device=router_weights.device)
-        #         self.router_count = 0
-
-        #     self.router_stat += router_weights.mean(dim=0).detach()
-        #     self.router_count += 1
-
-        # Experts: compute token-level expert outputs, but mix them with sample-level weights.
-        expert_outs = []
         for i in range(self.current_expert_num):
-            expert_out = self.lora_B_experts[i](self.lora_A_experts[i](x_dropped))
-            expert_outs.append(expert_out)
+            if x_lora.dim() == 3:
+                weight_i = router_weights[:, i].view(-1, 1, 1)
+            else:
+                weight_i = router_weights[:, i].view(-1, 1)
 
-        expert_outs = torch.stack(expert_outs, dim=-2)
-        if expert_outs.dim() == 4:
-            # [B, T, K, O] * [B, 1, K, 1]
-            router_weights = router_weights.unsqueeze(1)
-        lora_out = (expert_outs * router_weights.unsqueeze(-1)).sum(dim=-2)
+            # 权重很小时跳过
+            if torch.all(weight_i < 1e-4):
+                continue
+
+            expert_out = self.lora_B_experts[i](
+                self.lora_A_experts[i](x_dropped)
+            )
+            lora_out = lora_out + expert_out * weight_i
 
         result = result + (lora_out * self.scaling_val).to(previous_dtype)
-
-        # if not self.training and self.router_count % 50 == 0: # 每50个batch打印一次平均权重
-        #     avg = (self.router_stat / self.router_count).detach().cpu()
-        #     print(f"[Router Debug] avg weights: {avg}")
-
         return result
